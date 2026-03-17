@@ -6,14 +6,12 @@ import requests
 from sklearn.ensemble import RandomForestClassifier
 
 # ---------------------------------------------------------
-# 💡 핵심 개선: PubChem API 단일화 (RDKit 의존성 완벽 제거)
-# 이제 RDKit이 서버에 설치되지 않아도 100% 정상 작동합니다.
+# PubChem API 단일화 및 데이터 형식(Type) 안전장치 추가
 # ---------------------------------------------------------
 def fetch_chemical_data(identifier, input_type="CAS Number"):
-    """PubChem에서 SMILES, 분자량, LogP를 한 번에 가져옵니다."""
+    """PubChem에서 SMILES, 분자량, LogP를 가져오고 숫자로 안전하게 변환합니다."""
     encoded_id = urllib.parse.quote(identifier.strip())
     
-    # 입력 타입에 따라 다른 API 주소 호출
     if input_type == "CAS Number":
         url = f"https://pubchem.ncbi.nlm.nih.gov/rest/pug/compound/name/{encoded_id}/property/CanonicalSMILES,MolecularWeight,XLogP/JSON"
     else:
@@ -24,9 +22,20 @@ def fetch_chemical_data(identifier, input_type="CAS Number"):
         if response.status_code == 200:
             data = response.json()['PropertyTable']['Properties'][0]
             smiles = data.get('CanonicalSMILES', identifier)
-            mw = data.get('MolecularWeight', 0.0)
-            logp = data.get('XLogP', 0.0) # PubChem에 XLogP가 없는 경우 0.0 처리
+            
+            # 💡 텍스트로 넘어온 데이터를 강제로 소수점 숫자(float)로 변환하는 안전장치
+            try:
+                mw = float(data.get('MolecularWeight', 0.0))
+            except (ValueError, TypeError):
+                mw = 0.0
+                
+            try:
+                logp = float(data.get('XLogP', 0.0))
+            except (ValueError, TypeError):
+                logp = 0.0
+                
             return True, smiles, mw, logp
+            
         elif response.status_code == 404:
             return False, "❌ PubChem DB에 해당 물질이 없습니다. 정확한 CAS 번호(예: 80-05-7)인지 확인해주세요.", None, None
         else:
@@ -43,9 +52,9 @@ def load_or_train_model():
     X_train = np.random.rand(500, 2) * [600, 6] 
     y_train = []
     for mw, logp in X_train:
-        if logp > 3.5 and 150 < mw < 400: y_train.append(2) # HIGH
-        elif logp > 2.0: y_train.append(1) # MEDIUM
-        else: y_train.append(0) # LOW
+        if logp > 3.5 and 150 < mw < 400: y_train.append(2)
+        elif logp > 2.0: y_train.append(1)
+        else: y_train.append(0)
         
     model = RandomForestClassifier(n_estimators=50, random_state=42)
     model.fit(X_train, y_train)
@@ -107,7 +116,7 @@ if menu == "대시보드":
 elif menu == "신규 분석":
     st.markdown("<div class='main-title'>Step 1. 물질 입력</div>", unsafe_allow_html=True)
 
-    input_type = st.radio("입력 방식", ["CAS Number", "SMILES"], horizontal=True) # CAS를 기본으로
+    input_type = st.radio("입력 방식", ["CAS Number", "SMILES"], horizontal=True)
     default_input = "80-05-7" if input_type == "CAS Number" else "CC(=O)OC1=CC=CC=C1C(=O)O"
     user_input = st.text_input("화학식 또는 번호를 입력하세요", value=default_input)
 
@@ -115,18 +124,16 @@ elif menu == "신규 분석":
         with st.spinner("PubChem DB 통신 및 AI 분석 중..."):
             st.session_state['input_val'] = user_input.strip()
             
-            # 1. API를 통해 데이터 추출
             success, smiles, mw, logp = fetch_chemical_data(st.session_state['input_val'], input_type)
             
             if success:
                 st.session_state['analyzed_smiles'] = smiles
                 st.session_state['chem_props'] = {'MolWt': mw, 'LogP': logp}
                 
-                # 2. ML 모델 예측 실행
                 rf_model = load_or_train_model()
                 probs = rf_model.predict_proba([[mw, logp]])[0]
                 
-                st.session_state['current_score'] = probs[2] # HIGH 확률
+                st.session_state['current_score'] = probs[2]
                 
                 if probs[2] > 0.6: st.session_state['current_risk'] = "HIGH"
                 elif probs[1] > 0.4: st.session_state['current_risk'] = "MEDIUM"
@@ -134,7 +141,6 @@ elif menu == "신규 분석":
                 
                 st.session_state['analysis_done'] = True
             else:
-                # 에러 발생 시 깔끔하게 메시지 출력
                 st.error(smiles) 
 
     if st.session_state['analysis_done']:
@@ -155,8 +161,11 @@ elif menu == "신규 분석":
             st.subheader("Estrogen Receptor Binding Probability")
             st.progress(int(score * 100))
             
-            # PubChem에서 추출한 데이터 표시
-            st.info(f"**추출된 모델 입력 특성 (Features)**\n\n- 분자량 (MolWt): {st.session_state['chem_props']['MolWt']:.2f} g/mol\n- 지용성 (LogP): {st.session_state['chem_props']['LogP']:.2f}")
+            # 💡 UI 렌더링 시에도 안전하게 float 형태로 처리
+            mw_val = float(st.session_state['chem_props'].get('MolWt', 0.0))
+            logp_val = float(st.session_state['chem_props'].get('LogP', 0.0))
+            
+            st.info(f"**추출된 모델 입력 특성 (Features)**\n\n- 분자량 (MolWt): {mw_val:.2f} g/mol\n- 지용성 (LogP): {logp_val:.2f}")
             
         with col_res2:
             encoded_id = urllib.parse.quote(st.session_state['analyzed_smiles'])
@@ -182,8 +191,8 @@ elif menu == "신규 분석":
 1. 분석 물질 정보
 - 입력값: {st.session_state['input_val']}
 - SMILES 구조: {st.session_state['analyzed_smiles']}
-- 분자량: {st.session_state['chem_props'].get('MolWt', 0):.2f}
-- 지용성(LogP): {st.session_state['chem_props'].get('LogP', 0):.2f}
+- 분자량: {mw_val:.2f}
+- 지용성(LogP): {logp_val:.2f}
 
 2. AI 예측 결과 (Random Forest Classifier)
 - 종합 위험도: {st.session_state['current_risk']}
