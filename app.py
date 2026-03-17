@@ -2,7 +2,9 @@ import streamlit as st
 import pandas as pd
 import random
 import numpy as np
+import urllib.parse
 
+# RDKit 임포트 (실패 시 PubChem API로 우회)
 try:
     from rdkit import Chem
     from rdkit.Chem import Draw
@@ -10,8 +12,10 @@ try:
 except ImportError:
     RDKIT_AVAILABLE = False
 
+###-------- 페이지 설정 --------###
 st.set_page_config(page_title="EDC 예측 플랫폼", page_icon="🧬", layout="wide")
 
+###-------- 세션 상태(Session State) 초기화 --------###
 if 'menu_option' not in st.session_state:
     st.session_state['menu_option'] = "대시보드"
 if 'analysis_done' not in st.session_state:
@@ -27,6 +31,7 @@ def go_to_new_analysis():
     st.session_state['menu_option'] = "신규 분석"
     st.session_state['analysis_done'] = False
 
+###-------- 스타일 설정 --------###
 st.markdown("""
 <style>
 .main-title {font-size:26px; font-weight:bold; color:#1E3A8A; margin-bottom: 20px;}
@@ -37,14 +42,17 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
+###-------- 사이드바 --------###
 with st.sidebar:
     st.title("📊 EDC Screening")
     menu = st.radio("메뉴 선택", ["대시보드", "신규 분석"], key='menu_option')
     st.markdown("---")
     st.caption("Powered by Cheminformatics")
 
+###-------- 대시보드 --------###
 if menu == "대시보드":
     st.session_state['analysis_done'] = False 
+    
     st.markdown("<div class='main-title'>EDC Screening Dashboard</div>", unsafe_allow_html=True)
 
     col1, col2, col3, col4 = st.columns(4)
@@ -77,16 +85,19 @@ if menu == "대시보드":
 
     st.button("새로운 물질 분석하기 🚀", on_click=go_to_new_analysis)
 
+###-------- 신규 분석 --------###
 elif menu == "신규 분석":
     st.markdown("<div class='main-title'>Step 1. 물질 입력</div>", unsafe_allow_html=True)
+
     input_type = st.radio("입력 방식", ["SMILES", "CAS Number"], horizontal=True)
-    default_smiles = "CC(=O)OC1=CC=CC=C1C(=O)O" 
-    user_input = st.text_input("화학식 또는 번호를 입력하세요", value=default_smiles)
+    default_input = "CC(=O)OC1=CC=CC=C1C(=O)O" if input_type == "SMILES" else "68737-61-1"
+    user_input = st.text_input("화학식 또는 번호를 입력하세요", value=default_input)
 
     if st.button("분석 실행 🔍"):
         st.session_state['analysis_done'] = True
         st.session_state['input_smiles'] = user_input
         st.session_state['current_score'] = random.uniform(0, 1)
+        
         score = st.session_state['current_score']
         if score > 0.7:
             st.session_state['current_risk'] = "HIGH"
@@ -98,35 +109,49 @@ elif menu == "신규 분석":
     if st.session_state['analysis_done']:
         st.markdown("---")
         st.markdown("<div class='main-title'>Step 2. 분석 결과 및 구조</div>", unsafe_allow_html=True)
+        
         col_res1, col_res2 = st.columns([1, 1])
         
         with col_res1:
             risk = st.session_state['current_risk']
             score = st.session_state['current_score']
+            
             if risk == "HIGH":
                 st.markdown(f"<div class='high'>🔴 HIGH RISK (Score: {score:.3f})</div>", unsafe_allow_html=True)
             elif risk == "MEDIUM":
                 st.markdown(f"<div class='medium'>🟡 MEDIUM RISK (Score: {score:.3f})</div>", unsafe_allow_html=True)
             else:
                 st.markdown(f"<div class='low'>🟢 LOW RISK (Score: {score:.3f})</div>", unsafe_allow_html=True)
+
             st.write("")
             st.subheader("Estrogen Receptor Binding Probability")
             st.progress(int(score * 100))
             
         with col_res2:
-            if RDKIT_AVAILABLE and input_type == "SMILES":
-                try:
-                    mol = Chem.MolFromSmiles(st.session_state['input_smiles'])
-                    if mol:
-                        img = Draw.MolToImage(mol, size=(300, 300))
-                        st.image(img, caption="2D Structure", width=250)
+            # PubChem API를 활용한 구조식 이미지 렌더링 (강력한 호환성)
+            current_id = st.session_state['input_smiles'].strip()
+            encoded_id = urllib.parse.quote(current_id)
+            
+            try:
+                if input_type == "CAS Number":
+                    img_url = f"https://pubchem.ncbi.nlm.nih.gov/rest/pug/compound/name/{encoded_id}/PNG"
+                    st.image(img_url, caption=f"2D Structure (PubChem: {current_id})", width=250)
+                else:
+                    if RDKIT_AVAILABLE:
+                        mol = Chem.MolFromSmiles(current_id)
+                        if mol:
+                            img = Draw.MolToImage(mol, size=(300, 300))
+                            st.image(img, caption="2D Structure (RDKit)", width=250)
+                        else:
+                            st.warning("유효하지 않은 SMILES 코드입니다.")
                     else:
-                        st.warning("유효하지 않은 SMILES 코드입니다.")
-                except Exception:
-                    st.error("구조식 렌더링 중 오류가 발생했습니다.")
-            elif not RDKIT_AVAILABLE:
-                st.info("💡 구조식을 보려면 RDKit이 필요합니다.")
+                        # RDKit이 작동하지 않으면 PubChem API로 SMILES 이미지 호출
+                        img_url = f"https://pubchem.ncbi.nlm.nih.gov/rest/pug/compound/smiles/{encoded_id}/PNG"
+                        st.image(img_url, caption="2D Structure (PubChem Fallback)", width=250)
+            except Exception as e:
+                st.error("구조식 이미지를 불러올 수 없습니다. 입력값을 확인해 주세요.")
 
+        ###-------- 하위 정보 탭 --------###
         st.markdown("---")
         tab1, tab2, tab3 = st.tabs(["작용기전 (AOP)", "규제 영향", "대체 물질 제안"])
         
@@ -147,7 +172,37 @@ elif menu == "신규 분석":
             })
             st.dataframe(alt_data, use_container_width=True, hide_index=True)
 
+        ###-------- 보고서 다운로드 기능 --------###
         st.markdown("---")
-        if st.button("📄 PDF 보고서 다운로드"):
-            st.success("보고서가 성공적으로 생성되었습니다! (Mock 다운로드 시작)")
-            st.balloons()
+        
+        # 다운로드할 텍스트 보고서 내용 구성
+        report_content = f"""========================================
+[ EDC Screening 플랫폼 분석 보고서 ]
+========================================
+
+1. 입력 정보
+- 입력 방식: {input_type}
+- 입력 값: {st.session_state['input_smiles']}
+
+2. 분석 결과 (예측 모델)
+- 종합 위험도: {st.session_state['current_risk']} RISK
+- ER Binding 점수: {st.session_state['current_score']:.3f}
+
+3. 작용 기전 (AOP)
+- 주요 타겟: Estrogen Receptor (ER) / Androgen Receptor (AR)
+- 경로: Receptor Binding → Gene Expression Alteration → Cellular Toxicity
+
+4. 규제 영향 예상
+- EU REACH: SVHC 후보 목록 검토 필요
+- K-REACH: 화학물질 등록 시 독성 시험자료 제출 요구 가능성
+
+* 본 보고서는 초기 스크리닝용 프로토타입 플랫폼에서 생성되었습니다.
+========================================"""
+
+        # 실제 다운로드 버튼 (클릭 시 브라우저에서 다운로드 실행)
+        st.download_button(
+            label="📄 분석 보고서 다운로드 (.txt)",
+            data=report_content,
+            file_name=f"EDC_Report_{st.session_state['input_smiles']}.txt",
+            mime="text/plain"
+        )
