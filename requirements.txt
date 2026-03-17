@@ -2,3 +2,9 @@ streamlit
   pandas
   numpy
   rdkit
+streamlit
+pandas
+numpy
+rdkit
+scikit-learn
+requests
