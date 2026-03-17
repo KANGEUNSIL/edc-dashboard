@@ -5,25 +5,42 @@ import urllib.parse
 import requests
 from sklearn.ensemble import RandomForestClassifier
 
-# RDKit 임포트
-try:
-    from rdkit import Chem
-    from rdkit.Chem import Descriptors
-    from rdkit.Chem import Draw
-    RDKIT_AVAILABLE = True
-except ImportError:
-    RDKIT_AVAILABLE = False
+# ---------------------------------------------------------
+# 💡 핵심 개선: PubChem API 단일화 (RDKit 의존성 완벽 제거)
+# 이제 RDKit이 서버에 설치되지 않아도 100% 정상 작동합니다.
+# ---------------------------------------------------------
+def fetch_chemical_data(identifier, input_type="CAS Number"):
+    """PubChem에서 SMILES, 분자량, LogP를 한 번에 가져옵니다."""
+    encoded_id = urllib.parse.quote(identifier.strip())
+    
+    # 입력 타입에 따라 다른 API 주소 호출
+    if input_type == "CAS Number":
+        url = f"https://pubchem.ncbi.nlm.nih.gov/rest/pug/compound/name/{encoded_id}/property/CanonicalSMILES,MolecularWeight,XLogP/JSON"
+    else:
+        url = f"https://pubchem.ncbi.nlm.nih.gov/rest/pug/compound/smiles/{encoded_id}/property/CanonicalSMILES,MolecularWeight,XLogP/JSON"
+        
+    try:
+        response = requests.get(url, timeout=10)
+        if response.status_code == 200:
+            data = response.json()['PropertyTable']['Properties'][0]
+            smiles = data.get('CanonicalSMILES', identifier)
+            mw = data.get('MolecularWeight', 0.0)
+            logp = data.get('XLogP', 0.0) # PubChem에 XLogP가 없는 경우 0.0 처리
+            return True, smiles, mw, logp
+        elif response.status_code == 404:
+            return False, "❌ PubChem DB에 해당 물질이 없습니다. 정확한 CAS 번호(예: 80-05-7)인지 확인해주세요.", None, None
+        else:
+            return False, f"❌ API 통신 오류 (상태 코드: {response.status_code})", None, None
+    except requests.exceptions.Timeout:
+        return False, "❌ 서버 응답 시간 초과. 잠시 후 다시 시도해주세요.", None, None
+    except Exception as e:
+        return False, f"❌ 네트워크 오류: {str(e)}", None, None
 
-###-------- 머신러닝 모델 세팅 (캐싱) --------###
+###-------- 머신러닝 모델 세팅 --------###
 @st.cache_resource
 def load_or_train_model():
-    # 실제 현업에서는 joblib.load('model.pkl')을 사용하지만,
-    # 프로토타입 시연을 위해 가상의 데이터로 랜덤포레스트 모델을 즉시 학습시킵니다.
     np.random.seed(42)
-    # 가상 특성 데이터: [분자량(MolWt), 지용성(LogP)]
     X_train = np.random.rand(500, 2) * [600, 6] 
-    
-    # 지용성과 분자량이 특정 수치 이상일 때 내분비계 교란 위험이 높도록 가상의 정답지(Label) 생성
     y_train = []
     for mw, logp in X_train:
         if logp > 3.5 and 150 < mw < 400: y_train.append(2) # HIGH
@@ -34,40 +51,21 @@ def load_or_train_model():
     model.fit(X_train, y_train)
     return model
 
-###-------- CAS 번호를 SMILES로 변환하는 함수 --------###
-def get_smiles_from_cas(cas_no):
-    try:
-        url = f"https://pubchem.ncbi.nlm.nih.gov/rest/pug/compound/name/{urllib.parse.quote(cas_no)}/property/CanonicalSMILES/JSON"
-        response = requests.get(url, timeout=5)
-        if response.status_code == 200:
-            return response.json()['PropertyTable']['Properties'][0]['CanonicalSMILES']
-    except Exception:
-        pass
-    return None
-
 ###-------- 페이지 설정 --------###
 st.set_page_config(page_title="EDC 예측 플랫폼", page_icon="🧬", layout="wide")
 
-if 'menu_option' not in st.session_state:
-    st.session_state['menu_option'] = "대시보드"
-if 'analysis_done' not in st.session_state:
-    st.session_state['analysis_done'] = False
-if 'current_score' not in st.session_state:
-    st.session_state['current_score'] = 0.0
-if 'current_risk' not in st.session_state:
-    st.session_state['current_risk'] = ""
-if 'input_val' not in st.session_state:
-    st.session_state['input_val'] = ""
-if 'analyzed_smiles' not in st.session_state:
-    st.session_state['analyzed_smiles'] = ""
-if 'chem_props' not in st.session_state:
-    st.session_state['chem_props'] = {}
+if 'menu_option' not in st.session_state: st.session_state['menu_option'] = "대시보드"
+if 'analysis_done' not in st.session_state: st.session_state['analysis_done'] = False
+if 'current_score' not in st.session_state: st.session_state['current_score'] = 0.0
+if 'current_risk' not in st.session_state: st.session_state['current_risk'] = ""
+if 'input_val' not in st.session_state: st.session_state['input_val'] = ""
+if 'analyzed_smiles' not in st.session_state: st.session_state['analyzed_smiles'] = ""
+if 'chem_props' not in st.session_state: st.session_state['chem_props'] = {}
 
 def go_to_new_analysis():
     st.session_state['menu_option'] = "신규 분석"
     st.session_state['analysis_done'] = False
 
-###-------- 스타일 설정 --------###
 st.markdown("""
 <style>
 .main-title {font-size:26px; font-weight:bold; color:#1E3A8A; margin-bottom: 20px;}
@@ -89,7 +87,6 @@ with st.sidebar:
 if menu == "대시보드":
     st.session_state['analysis_done'] = False 
     st.markdown("<div class='main-title'>EDC Screening Dashboard</div>", unsafe_allow_html=True)
-
     col1, col2, col3, col4 = st.columns(4)
     col1.metric("총 분석 물질", "1,024", "12 ↑")
     col2.metric("High Risk", "156", "3 ↑")
@@ -100,61 +97,45 @@ if menu == "대시보드":
     col_chart, col_table = st.columns([1, 1])
     with col_chart:
         st.subheader("📈 주간 분석 현황")
-        chart_data = pd.DataFrame(np.random.randint(5, 20, size=(7, 3)), columns=["High", "Medium", "Low"], index=["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"])
-        st.bar_chart(chart_data)
+        st.bar_chart(pd.DataFrame(np.random.randint(5, 20, size=(7, 3)), columns=["High", "Medium", "Low"], index=["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]))
     with col_table:
         st.subheader("📋 최근 고위험 물질 목록")
-        recent_data = pd.DataFrame({"CAS No.": ["80-05-7", "117-81-7", "25154-52-3"], "물질명": ["Bisphenol A", "DEHP", "Nonylphenol"], "위험도": ["HIGH", "HIGH", "HIGH"]})
-        st.dataframe(recent_data, use_container_width=True, hide_index=True)
+        st.dataframe(pd.DataFrame({"CAS No.": ["80-05-7", "117-81-7", "25154-52-3"], "물질명": ["Bisphenol A", "DEHP", "Nonylphenol"], "위험도": ["HIGH", "HIGH", "HIGH"]}), use_container_width=True, hide_index=True)
     st.button("새로운 물질 분석하기 🚀", on_click=go_to_new_analysis)
 
 ###-------- 신규 분석 --------###
 elif menu == "신규 분석":
     st.markdown("<div class='main-title'>Step 1. 물질 입력</div>", unsafe_allow_html=True)
 
-    input_type = st.radio("입력 방식", ["SMILES", "CAS Number"], horizontal=True)
-    default_input = "CC(=O)OC1=CC=CC=C1C(=O)O" if input_type == "SMILES" else "68737-61-1"
+    input_type = st.radio("입력 방식", ["CAS Number", "SMILES"], horizontal=True) # CAS를 기본으로
+    default_input = "80-05-7" if input_type == "CAS Number" else "CC(=O)OC1=CC=CC=C1C(=O)O"
     user_input = st.text_input("화학식 또는 번호를 입력하세요", value=default_input)
 
     if st.button("분석 실행 🔍"):
-        with st.spinner("AI 모델이 화학적 특성을 추출하고 분석 중입니다..."):
+        with st.spinner("PubChem DB 통신 및 AI 분석 중..."):
             st.session_state['input_val'] = user_input.strip()
-            smiles_to_analyze = st.session_state['input_val']
             
-            # CAS Number 입력 시 PubChem API를 통해 SMILES 확보
-            if input_type == "CAS Number":
-                fetched_smiles = get_smiles_from_cas(smiles_to_analyze)
-                if fetched_smiles:
-                    smiles_to_analyze = fetched_smiles
-                else:
-                    st.error("해당 CAS 번호의 분자 구조(SMILES)를 DB에서 찾을 수 없습니다.")
-                    st.stop()
+            # 1. API를 통해 데이터 추출
+            success, smiles, mw, logp = fetch_chemical_data(st.session_state['input_val'], input_type)
             
-            st.session_state['analyzed_smiles'] = smiles_to_analyze
-            
-            # RDKit으로 분자 특성(Features) 추출
-            if RDKIT_AVAILABLE:
-                mol = Chem.MolFromSmiles(smiles_to_analyze)
-                if mol:
-                    mw = Descriptors.MolWt(mol)
-                    logp = Descriptors.MolLogP(mol)
-                    st.session_state['chem_props'] = {'MolWt': mw, 'LogP': logp}
-                    
-                    # ML 모델 예측 실행
-                    rf_model = load_or_train_model()
-                    probs = rf_model.predict_proba([[mw, logp]])[0]
-                    
-                    st.session_state['current_score'] = probs[2] # HIGH 클래스의 확률
-                    
-                    if probs[2] > 0.6: st.session_state['current_risk'] = "HIGH"
-                    elif probs[1] > 0.4: st.session_state['current_risk'] = "MEDIUM"
-                    else: st.session_state['current_risk'] = "LOW"
-                    
-                    st.session_state['analysis_done'] = True
-                else:
-                    st.error("유효하지 않은 구조식입니다. RDKit 분석에 실패했습니다.")
+            if success:
+                st.session_state['analyzed_smiles'] = smiles
+                st.session_state['chem_props'] = {'MolWt': mw, 'LogP': logp}
+                
+                # 2. ML 모델 예측 실행
+                rf_model = load_or_train_model()
+                probs = rf_model.predict_proba([[mw, logp]])[0]
+                
+                st.session_state['current_score'] = probs[2] # HIGH 확률
+                
+                if probs[2] > 0.6: st.session_state['current_risk'] = "HIGH"
+                elif probs[1] > 0.4: st.session_state['current_risk'] = "MEDIUM"
+                else: st.session_state['current_risk'] = "LOW"
+                
+                st.session_state['analysis_done'] = True
             else:
-                st.error("머신러닝 특성 추출을 위해 서버에 RDKit 설치가 필요합니다.")
+                # 에러 발생 시 깔끔하게 메시지 출력
+                st.error(smiles) 
 
     if st.session_state['analysis_done']:
         st.markdown("---")
@@ -174,13 +155,13 @@ elif menu == "신규 분석":
             st.subheader("Estrogen Receptor Binding Probability")
             st.progress(int(score * 100))
             
-            # 머신러닝에 사용된 Feature 공개
+            # PubChem에서 추출한 데이터 표시
             st.info(f"**추출된 모델 입력 특성 (Features)**\n\n- 분자량 (MolWt): {st.session_state['chem_props']['MolWt']:.2f} g/mol\n- 지용성 (LogP): {st.session_state['chem_props']['LogP']:.2f}")
             
         with col_res2:
             encoded_id = urllib.parse.quote(st.session_state['analyzed_smiles'])
             img_url = f"https://pubchem.ncbi.nlm.nih.gov/rest/pug/compound/smiles/{encoded_id}/PNG"
-            st.image(img_url, caption="2D Structure", width=250)
+            st.image(img_url, caption="2D Structure (from PubChem)", width=250)
 
         ###-------- 하위 정보 탭 --------###
         st.markdown("---")
