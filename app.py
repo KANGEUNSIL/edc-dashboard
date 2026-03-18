@@ -6,10 +6,9 @@ import requests
 from sklearn.ensemble import RandomForestClassifier
 
 # ---------------------------------------------------------
-# PubChem API 단일화 및 데이터 형식(Type) 안전장치 추가
+# PubChem API 단일화 및 데이터 형식(Type) 안전장치
 # ---------------------------------------------------------
 def fetch_chemical_data(identifier, input_type="CAS Number"):
-    """PubChem에서 SMILES, 분자량, LogP를 가져오고 숫자로 안전하게 변환합니다."""
     encoded_id = urllib.parse.quote(identifier.strip())
     
     if input_type == "CAS Number":
@@ -23,16 +22,11 @@ def fetch_chemical_data(identifier, input_type="CAS Number"):
             data = response.json()['PropertyTable']['Properties'][0]
             smiles = data.get('CanonicalSMILES', identifier)
             
-            # 💡 텍스트로 넘어온 데이터를 강제로 소수점 숫자(float)로 변환하는 안전장치
-            try:
-                mw = float(data.get('MolecularWeight', 0.0))
-            except (ValueError, TypeError):
-                mw = 0.0
+            try: mw = float(data.get('MolecularWeight', 0.0))
+            except (ValueError, TypeError): mw = 0.0
                 
-            try:
-                logp = float(data.get('XLogP', 0.0))
-            except (ValueError, TypeError):
-                logp = 0.0
+            try: logp = float(data.get('XLogP', 0.0))
+            except (ValueError, TypeError): logp = 0.0
                 
             return True, smiles, mw, logp
             
@@ -63,11 +57,13 @@ def load_or_train_model():
 ###-------- 페이지 설정 --------###
 st.set_page_config(page_title="EDC 예측 플랫폼", page_icon="🧬", layout="wide")
 
+# 세션 상태 초기화 (사용된 입력 방식 저장용 변수 추가)
 if 'menu_option' not in st.session_state: st.session_state['menu_option'] = "대시보드"
 if 'analysis_done' not in st.session_state: st.session_state['analysis_done'] = False
 if 'current_score' not in st.session_state: st.session_state['current_score'] = 0.0
 if 'current_risk' not in st.session_state: st.session_state['current_risk'] = ""
 if 'input_val' not in st.session_state: st.session_state['input_val'] = ""
+if 'used_input_type' not in st.session_state: st.session_state['used_input_type'] = "CAS Number"
 if 'analyzed_smiles' not in st.session_state: st.session_state['analyzed_smiles'] = ""
 if 'chem_props' not in st.session_state: st.session_state['chem_props'] = {}
 
@@ -123,6 +119,7 @@ elif menu == "신규 분석":
     if st.button("분석 실행 🔍"):
         with st.spinner("PubChem DB 통신 및 AI 분석 중..."):
             st.session_state['input_val'] = user_input.strip()
+            st.session_state['used_input_type'] = input_type # 사용자가 선택한 입력 방식 저장
             
             success, smiles, mw, logp = fetch_chemical_data(st.session_state['input_val'], input_type)
             
@@ -130,14 +127,21 @@ elif menu == "신규 분석":
                 st.session_state['analyzed_smiles'] = smiles
                 st.session_state['chem_props'] = {'MolWt': mw, 'LogP': logp}
                 
+# 2. ML 모델 예측 실행
                 rf_model = load_or_train_model()
                 probs = rf_model.predict_proba([[mw, logp]])[0]
                 
-                st.session_state['current_score'] = probs[2]
+                # [수정] LOW(probs[0]), MEDIUM(probs[1]), HIGH(probs[2]) 확률을 조합하여
+                # 0 ~ 100% 사이의 통합 위험도 점수(Score)를 계산합니다.
+                unified_score = (probs[1] * 0.5) + (probs[2] * 1.0)
+                st.session_state['current_score'] = unified_score
                 
-                if probs[2] > 0.6: st.session_state['current_risk'] = "HIGH"
-                elif probs[1] > 0.4: st.session_state['current_risk'] = "MEDIUM"
-                else: st.session_state['current_risk'] = "LOW"
+                if unified_score > 0.6: 
+                    st.session_state['current_risk'] = "HIGH"
+                elif unified_score > 0.3: 
+                    st.session_state['current_risk'] = "MEDIUM"
+                else: 
+                    st.session_state['current_risk'] = "LOW"
                 
                 st.session_state['analysis_done'] = True
             else:
@@ -161,15 +165,20 @@ elif menu == "신규 분석":
             st.subheader("Estrogen Receptor Binding Probability")
             st.progress(int(score * 100))
             
-            # 💡 UI 렌더링 시에도 안전하게 float 형태로 처리
             mw_val = float(st.session_state['chem_props'].get('MolWt', 0.0))
             logp_val = float(st.session_state['chem_props'].get('LogP', 0.0))
             
             st.info(f"**추출된 모델 입력 특성 (Features)**\n\n- 분자량 (MolWt): {mw_val:.2f} g/mol\n- 지용성 (LogP): {logp_val:.2f}")
             
         with col_res2:
-            encoded_id = urllib.parse.quote(st.session_state['analyzed_smiles'])
-            img_url = f"https://pubchem.ncbi.nlm.nih.gov/rest/pug/compound/smiles/{encoded_id}/PNG"
+            # 💡 수정된 부분: CAS 번호 입력 시 CAS 번호로 이미지를 요청하여 에러 방지
+            if st.session_state['used_input_type'] == "CAS Number":
+                encoded_id = urllib.parse.quote(st.session_state['input_val'])
+                img_url = f"https://pubchem.ncbi.nlm.nih.gov/rest/pug/compound/name/{encoded_id}/PNG"
+            else:
+                encoded_id = urllib.parse.quote(st.session_state['analyzed_smiles'])
+                img_url = f"https://pubchem.ncbi.nlm.nih.gov/rest/pug/compound/smiles/{encoded_id}/PNG"
+                
             st.image(img_url, caption="2D Structure (from PubChem)", width=250)
 
         ###-------- 하위 정보 탭 --------###
@@ -181,7 +190,14 @@ elif menu == "신규 분석":
         with tab2:
             st.write("- **EU REACH:** SVHC 후보 목록 검토 필요")
         with tab3:
+            # 💡 수정된 부분: 대체 물질 표(DataFrame) 코드 복구
             st.write("유사 구조 대체 물질 검색 결과입니다.")
+            alt_data = pd.DataFrame({
+                "추천 대체 물질 (SMILES)": ["CC(=O)Oc1ccccc1C(=O)O", "CCOc1ccc(CC(=O)O)cc1"],
+                "유사도 (Tanimoto)": ["85%", "78%"],
+                "예상 위험도": ["LOW", "LOW"]
+            })
+            st.dataframe(alt_data, use_container_width=True, hide_index=True)
 
         ###-------- 보고서 다운로드 기능 --------###
         st.markdown("---")
